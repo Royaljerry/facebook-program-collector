@@ -1,0 +1,19 @@
+{
+  "name": "program-collector",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Collect Facebook venue events and render a small markdown program table.",
+  "scripts": {
+    "setup": "npm install && npx playwright install chromium",
+    "login": "node src/login-facebook.js",
+    "collect:godor": "node src/collect-facebook-events.js --venue https://www.facebook.com/godorklub --from 2026-05-01 --to 2026-05-02 --out output/godor-2026-05-01.md",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "playwright": "latest"
+  }
+}
