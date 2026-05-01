@@ -1,52 +1,51 @@
-# Program Collector
+# Facebook Program Collector
 
-First iteration: collect the current Friday/Saturday Facebook events for one venue and render a markdown table row.
-
-The collector uses Playwright because Facebook event pages are client-rendered and may need an authenticated browser session.
+First iteration: collect public Facebook events from one venue and write a markdown table with event name, URL, date, and detected entry fee.
 
 ## Setup
 
 ```sh
-cd program-collector
-npm run setup
+cd dev
+npm install
+npx playwright install chromium
 ```
 
-## Log in to Facebook once
-
-```sh
-npm run login
-```
-
-This opens a visible Chromium window and stores the session in `program-collector/.fb-profile/`.
-
-## Collect Gödör events for May 1-2, 2026
+## Run the Gödör Klub query
 
 ```sh
 npm run collect:godor
 ```
 
-Output is written to:
+The default output path is:
 
 ```text
-program-collector/output/godor-2026-05-01.md
+dev/output/godorklub-2026-05-01_2026-05-02.md
 ```
 
-The script also writes a JSON debug file with the event snippets and extracted fee evidence.
-
-## Useful options
+If Facebook asks for login, cookies, or extra verification, run the same query in a visible browser:
 
 ```sh
-node src/collect-facebook-events.js \
-  --venue https://www.facebook.com/godorklub \
-  --from 2026-05-01 \
-  --to 2026-05-02 \
-  --out output/godor-2026-05-01.md
+npm run collect:godor -- --headed
 ```
 
-Optional flags:
+Log in or accept the dialog in the opened browser window, then run the command again. The browser session is stored in `dev/.facebook-profile`.
 
-- `--headless` runs the browser invisibly.
-- `--profile-dir <path>` changes where the Facebook browser session is stored.
-- `--max-events <number>` limits how many event pages are visited after scanning the venue page.
+## Custom query
 
-If the markdown contains `?` even though the venue has events, run `npm run login` again. Facebook often shows less data to logged-out or fresh browser sessions.
+```sh
+npm run collect -- \
+  --venue https://www.facebook.com/godorklub \
+  --dates 2026-05-01,2026-05-02 \
+  --out output/godor.md \
+  --headed
+```
+
+Useful flags:
+
+- `--venue`: Facebook venue/page URL.
+- `--dates`: comma-separated `YYYY-MM-DD` dates. If omitted, the current week's Friday and Saturday are used in the `Europe/Budapest` timezone.
+- `--out`: markdown output path, relative to `dev` unless absolute.
+- `--headed`: open a visible browser.
+- `--keep-open`: leave the browser open at the end, useful while logging in.
+- `--debug`: write candidate extraction details to `dev/debug/last-run.json`.
+- `--max-events`: maximum candidate event pages to inspect. Default: `30`.
