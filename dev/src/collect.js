@@ -4,9 +4,9 @@ import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 
-const DEFAULT_VENUE = 'https://www.facebook.com/godorklub';
 const DEFAULT_TIME_ZONE = 'Europe/Budapest';
 const ROOT_DIR = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
+const DEFAULT_VENUES_FILE = 'venues.txt';
 
 const MONTHS = {
   en: [
@@ -64,7 +64,8 @@ const WEEKDAYS = {
 
 function parseArgs(argv) {
   const options = {
-    venue: DEFAULT_VENUE,
+    venue: null,
+    venuesFile: DEFAULT_VENUES_FILE,
     dates: null,
     out: null,
     headed: false,
@@ -88,6 +89,8 @@ function parseArgs(argv) {
 
     if (arg === '--venue') {
       options.venue = readValue();
+    } else if (arg === '--venues-file') {
+      options.venuesFile = readValue();
     } else if (arg === '--dates') {
       options.dates = readValue()
         .split(',')
@@ -127,11 +130,12 @@ function parseArgs(argv) {
   options.dates.forEach(assertIsoDate);
 
   if (!options.out) {
-    const slug = venueSlug(options.venue) || 'facebook-venue';
+    const slug = options.venue ? venueSlug(options.venue) || 'facebook-venue' : 'program';
     options.out = `output/${slug}-${options.dates.join('_')}.md`;
   }
 
   options.out = resolveInsideDev(options.out);
+  options.venuesFile = resolveInsideDev(options.venuesFile);
   options.profileDir = resolveInsideDev(options.profileDir);
 
   return options;
@@ -141,10 +145,12 @@ function printHelp() {
   console.log(`Facebook Program Collector
 
 Usage:
+  npm run collect -- --dates 2026-05-01,2026-05-02
   npm run collect -- --venue https://www.facebook.com/godorklub --dates 2026-05-01,2026-05-02
 
 Options:
-  --venue <url>          Facebook venue page URL
+  --venues-file <path>   File with one Facebook venue URL per line, default venues.txt
+  --venue <url>          Single Facebook venue page URL; overrides --venues-file
   --dates <dates>        Comma-separated YYYY-MM-DD dates
   --out <path>           Markdown output path, inside dev unless absolute
   --headed               Open a visible browser
@@ -212,8 +218,14 @@ function venueSlug(venueUrl) {
 
 function eventsUrlForVenue(venueUrl) {
   const url = new URL(venueUrl);
-  url.search = '';
   url.hash = '';
+
+  if (url.pathname.replace(/\/+$/, '') === '/profile.php' && url.searchParams.has('id')) {
+    url.searchParams.set('sk', 'events');
+    return url.toString();
+  }
+
+  url.search = '';
   const parts = url.pathname.split('/').filter(Boolean);
 
   if (!parts.includes('events')) {
@@ -226,10 +238,14 @@ function eventsUrlForVenue(venueUrl) {
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));
+  const venues = await loadVenueUrls(options);
   await fs.mkdir(path.dirname(options.out), { recursive: true });
   await fs.mkdir(options.profileDir, { recursive: true });
 
-  console.log(`Collecting ${options.venue}`);
+  console.log(`Collecting ${venues.length} venue${venues.length === 1 ? '' : 's'}`);
+  if (!options.venue) {
+    console.log(`Venues file: ${path.relative(ROOT_DIR, options.venuesFile)}`);
+  }
   console.log(`Dates: ${options.dates.join(', ')}`);
   console.log(`Output: ${path.relative(ROOT_DIR, options.out)}`);
 
@@ -245,9 +261,17 @@ async function main() {
   const page = context.pages()[0] ?? (await context.newPage());
   page.setDefaultTimeout(15_000);
 
-  let result;
+  const venueResults = [];
   try {
-    result = await collectVenueEvents(page, options);
+    for (const [index, venueUrl] of venues.entries()) {
+      console.log(`\n[${index + 1}/${venues.length}] Collecting ${venueUrl}`);
+      try {
+        const result = await collectVenueEvents(page, { ...options, venue: venueUrl });
+        venueResults.push(result);
+      } catch (error) {
+        venueResults.push(failedVenueResult(venueUrl, options.dates, error));
+      }
+    }
   } finally {
     if (options.keepOpen) {
       console.log('Browser left open because --keep-open was used. Press Ctrl+C when done.');
@@ -256,6 +280,12 @@ async function main() {
     }
   }
 
+  const result = {
+    source: options.venue ? '--venue' : path.relative(ROOT_DIR, options.venuesFile),
+    dates: options.dates,
+    generatedAt: new Date().toISOString(),
+    venueResults,
+  };
   const markdown = renderMarkdown(result);
   await fs.writeFile(options.out, markdown, 'utf8');
   console.log(`Wrote ${path.relative(ROOT_DIR, options.out)}`);
@@ -263,13 +293,87 @@ async function main() {
   if (options.debug) {
     const debugPath = path.join(ROOT_DIR, 'debug', 'last-run.json');
     await fs.mkdir(path.dirname(debugPath), { recursive: true });
-    await fs.writeFile(debugPath, `${JSON.stringify(result.debugEvents, null, 2)}\n`, 'utf8');
+    await fs.writeFile(debugPath, `${JSON.stringify(result.venueResults, null, 2)}\n`, 'utf8');
     console.log(`Wrote ${path.relative(ROOT_DIR, debugPath)}`);
   }
 
-  if (result.notes.length > 0) {
+  const notes = result.venueResults.flatMap((venueResult) =>
+    venueResult.notes.map((note) => `${venueResult.venueLabel}: ${note}`),
+  );
+  if (notes.length > 0) {
     console.log('\nNotes:');
-    result.notes.forEach((note) => console.log(`- ${note}`));
+    notes.forEach((note) => console.log(`- ${note}`));
+  }
+}
+
+function failedVenueResult(venueUrl, dates, error) {
+  return {
+    venueUrl,
+    venueLabel: venueSlug(venueUrl) || venueUrl,
+    eventsUrl: safeEventsUrlForVenue(venueUrl),
+    dates,
+    events: [],
+    notes: [`Could not collect this venue: ${error.message}`],
+    debugEvents: [],
+  };
+}
+
+function safeEventsUrlForVenue(venueUrl) {
+  try {
+    return eventsUrlForVenue(venueUrl);
+  } catch {
+    return venueUrl;
+  }
+}
+
+async function loadVenueUrls(options) {
+  if (options.venue) {
+    validateVenueUrl(options.venue);
+    return [options.venue];
+  }
+
+  let content;
+  try {
+    content = await fs.readFile(options.venuesFile, 'utf8');
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      throw new Error(`Venue file not found: ${path.relative(ROOT_DIR, options.venuesFile)}`);
+    }
+    throw error;
+  }
+
+  const seen = new Set();
+  const venues = [];
+
+  content
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith('#'))
+    .forEach((line) => {
+      validateVenueUrl(line);
+      if (!seen.has(line)) {
+        seen.add(line);
+        venues.push(line);
+      }
+    });
+
+  if (venues.length === 0) {
+    throw new Error(`Venue file has no URLs: ${path.relative(ROOT_DIR, options.venuesFile)}`);
+  }
+
+  return venues;
+}
+
+function validateVenueUrl(venueUrl) {
+  let url;
+  try {
+    url = new URL(venueUrl);
+  } catch {
+    throw new Error(`Invalid venue URL: ${venueUrl}`);
+  }
+
+  if (!/(\.|^)facebook\.com$/i.test(url.hostname)) {
+    throw new Error(`Venue URL must be on facebook.com: ${venueUrl}`);
   }
 }
 
@@ -282,16 +386,17 @@ async function collectVenueEvents(page, options) {
   await page.goto(eventsUrl, { waitUntil: 'domcontentloaded', timeout: 45_000 });
   await settlePage(page);
   await dismissFacebookDialogs(page);
+  const venueLabel = await extractVenueLabel(page, options.venue);
 
   const loginDetected = await isLoginDetected(page);
   if (loginDetected) {
     notes.push(
-      'Facebook rendered login controls in the public view. Some details, especially ticket prices, may be hidden. Run with --headed, log in, then rerun for fuller extraction.',
+      'Facebook rendered login controls in the public view. Some event details may be hidden. Run with --headed, log in, then rerun for fuller extraction.',
     );
   }
 
   const candidates = await collectEventLinks(page, options.maxEvents);
-  console.log(`Found ${candidates.length} candidate event links`);
+  console.log(`Found ${candidates.length} candidate event links for ${venueLabel}`);
 
   if (candidates.length === 0) {
     notes.push('No event links were found on the venue events page. Facebook may require login, or the DOM changed.');
@@ -315,13 +420,6 @@ async function collectVenueEvents(page, options) {
     try {
       const details = await inspectEventPage(eventPage, eventUrl, candidate.title);
       const matchingDate = findMatchingDate(details, targetDates);
-      if (matchingDate && details.fee === 'Not found') {
-        const ticketFee = await extractFeeFromTicketLinks(eventPage.context(), details.ticketLinks);
-        if (ticketFee) {
-          details.fee = ticketFee.value;
-          details.feeEvidence = ticketFee.evidence;
-        }
-      }
       if (options.debug) {
         debugEvents.push({
           url: eventUrl,
@@ -330,9 +428,6 @@ async function collectVenueEvents(page, options) {
           startDate: details.startDate,
           dateText: details.dateText.slice(0, 1200),
           matchedDate: matchingDate?.iso ?? null,
-          fee: details.fee,
-          feeEvidence: details.feeEvidence,
-          ticketLinks: details.ticketLinks,
         });
       }
       if (matchingDate) {
@@ -340,8 +435,6 @@ async function collectVenueEvents(page, options) {
           date: matchingDate.iso,
           title: details.title,
           url: eventUrl,
-          fee: details.fee,
-          feeEvidence: details.feeEvidence,
         });
       }
     } catch (error) {
@@ -359,13 +452,36 @@ async function collectVenueEvents(page, options) {
 
   return {
     venueUrl: options.venue,
+    venueLabel,
     eventsUrl,
     dates: options.dates,
-    generatedAt: new Date().toISOString(),
     events,
     notes,
     debugEvents,
   };
+}
+
+async function extractVenueLabel(page, venueUrl) {
+  try {
+    const label = await page.evaluate(() => {
+      const meta = (selector) => document.querySelector(selector)?.getAttribute('content')?.trim() ?? '';
+      const heading = [...document.querySelectorAll('h1, [role="heading"]')]
+        .map((element) => element.innerText || element.textContent || '')
+        .map((value) => value.replace(/\s+/g, ' ').trim())
+        .find(Boolean);
+
+      return meta('meta[property="og:title"]') || heading || document.title || '';
+    });
+
+    const cleaned = cleanTitle(label);
+    if (cleaned && !/^facebook$/i.test(cleaned)) {
+      return cleaned;
+    }
+  } catch {
+    // Fall through to the URL-derived label.
+  }
+
+  return venueSlug(venueUrl) || venueUrl;
 }
 
 async function settlePage(page) {
@@ -505,14 +621,6 @@ async function inspectEventPage(page, eventUrl, fallbackTitle) {
       text,
       headings,
       jsonLd,
-      links: [...document.querySelectorAll('a[href]')].map((anchor) => ({
-        url: anchor.href,
-        text: [anchor.innerText, anchor.getAttribute('aria-label'), anchor.textContent]
-          .filter(Boolean)
-          .join(' ')
-          .replace(/\s+/g, ' ')
-          .trim(),
-      })),
       startTime:
         meta('meta[property="event:start_time"]') ||
         meta('meta[property="og:start_time"]') ||
@@ -527,93 +635,13 @@ async function inspectEventPage(page, eventUrl, fallbackTitle) {
     [payload.title, payload.description, payload.startTime, payload.headings.join('\n'), fallbackTitle].join('\n'),
   );
   const title = cleanTitle(structured.name || payload.title || fallbackTitle || 'Untitled Facebook event');
-  const offerFee = feeFromStructuredOffers(structured.offers);
-  const extractedFee = offerFee ?? extractEntryFee(text);
-  const ticketLinks = extractTicketLinks(payload.links);
 
   return {
     title,
     text,
     dateText,
     startDate: structured.startDate || payload.startTime || '',
-    fee: extractedFee.value,
-    feeEvidence: extractedFee.evidence,
-    ticketLinks,
   };
-}
-
-async function extractFeeFromTicketLinks(context, ticketLinks) {
-  for (const ticketLink of ticketLinks.slice(0, 3)) {
-    const page = await context.newPage();
-    page.setDefaultTimeout(10_000);
-
-    try {
-      await page.goto(ticketLink.url, { waitUntil: 'domcontentloaded', timeout: 25_000 });
-      await page.waitForTimeout(2500);
-      const text = await page.locator('body').innerText({ timeout: 10_000 });
-      const fee = extractEntryFee(text);
-
-      if (fee.value !== 'Not found') {
-        return {
-          value: fee.value,
-          evidence: `Ticket page ${ticketLink.url}: ${fee.evidence}`,
-        };
-      }
-    } catch {
-      // External ticket pages are best effort; Facebook data should still be returned.
-    } finally {
-      await page.close();
-    }
-  }
-
-  return null;
-}
-
-function extractTicketLinks(rawLinks) {
-  const byUrl = new Map();
-
-  for (const rawLink of rawLinks || []) {
-    const url = unwrapFacebookRedirect(rawLink.url);
-    if (!url || !isTicketLikeLink(url, rawLink.text)) {
-      continue;
-    }
-
-    byUrl.set(url, { url, text: rawLink.text });
-  }
-
-  return [...byUrl.values()].slice(0, 5);
-}
-
-function unwrapFacebookRedirect(rawUrl) {
-  try {
-    const url = new URL(rawUrl, 'https://www.facebook.com');
-    const redirected = url.searchParams.get('u');
-
-    if (redirected && /facebook\.com\/l\.php$/i.test(url.hostname + url.pathname)) {
-      return new URL(redirected).toString();
-    }
-
-    url.hash = '';
-    return url.toString();
-  } catch {
-    return '';
-  }
-}
-
-function isTicketLikeLink(rawUrl, text = '') {
-  let url;
-  try {
-    url = new URL(rawUrl);
-  } catch {
-    return false;
-  }
-
-  if (/(\.|^)facebook\.com$/i.test(url.hostname)) {
-    return false;
-  }
-
-  const haystack = `${text} ${url.hostname} ${url.pathname}`.toLowerCase();
-  return /ticket|tickets|jegy|jegyvasarlas|tixa|cooltix|eventim|oneticket|funcode|rock1|jegy\.hu/.test(haystack);
 }
 
 function parseEventJsonLd(scripts) {
@@ -662,102 +690,6 @@ function compactText(text) {
     .replace(/[ \t]+/g, ' ')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
-}
-
-function feeFromStructuredOffers(offers) {
-  const offerList = Array.isArray(offers) ? offers : offers ? [offers] : [];
-
-  for (const offer of offerList) {
-    if (!offer || typeof offer !== 'object') {
-      continue;
-    }
-
-    const price = offer.price ?? offer.lowPrice ?? offer.highPrice;
-    if (price === undefined || price === null || price === '') {
-      continue;
-    }
-
-    const numeric = Number.parseFloat(String(price).replace(',', '.'));
-    if (Number.isFinite(numeric) && numeric === 0) {
-      return { value: 'Free', evidence: 'structured offer price: 0' };
-    }
-
-    const currency = offer.priceCurrency || offer.currency || '';
-    return {
-      value: `${price}${currency ? ` ${currency}` : ''}`,
-      evidence: 'structured offer price',
-    };
-  }
-
-  return null;
-}
-
-function extractEntryFee(text) {
-  const lines = text
-    .split('\n')
-    .map((line) => line.replace(/\s+/g, ' ').trim())
-    .filter(Boolean);
-
-  const freeLine = lines.find((line) => /\bfree\b|ingyenes|d[ií]jtalan|szabad bel[eé]p[eé]s/i.test(line));
-  if (freeLine) {
-    return { value: 'Free', evidence: freeLine };
-  }
-
-  const currencyPriceRegex =
-    /\b(?:HUF|Ft|forint)\s*\d{3,6}\b|\b\d{3,6}\s*(?:HUF|Ft|forint)\b|\b\d{1,3}(?:[ .]\d{3})+\s*(?:HUF|Ft|forint)\b|\b(?:HUF|Ft|forint)\s*\d{1,3}(?:[ .]\d{3})+\b/gi;
-  const bareThousandPriceRegex = /\b\d{1,3}(?:[ .]\d{3})+\b/g;
-  const feeWords =
-    /ticket|tickets|entry|admission|door|presale|price|fee|jegy|jegy[aá]r|bel[eé]p[oő]|helysz[ií]n|el[oő]v[eé]tel/i;
-
-  const feeLines = lines
-    .filter((line) => containsPrice(line, currencyPriceRegex) || (feeWords.test(line) && containsPrice(line, bareThousandPriceRegex)))
-    .map((line) => {
-      currencyPriceRegex.lastIndex = 0;
-      bareThousandPriceRegex.lastIndex = 0;
-      return line;
-    })
-    .filter((line) => feeWords.test(line))
-    .slice(0, 3);
-
-  if (feeLines.length > 0) {
-    return {
-      value: summarizePrices(feeLines.join(' / ')) || feeLines.join(' / '),
-      evidence: feeLines.join(' / '),
-    };
-  }
-
-  const anyPriceLine = lines.find((line) => {
-    currencyPriceRegex.lastIndex = 0;
-    return currencyPriceRegex.test(line);
-  });
-
-  if (anyPriceLine) {
-    return {
-      value: summarizePrices(anyPriceLine) || anyPriceLine,
-      evidence: anyPriceLine,
-    };
-  }
-
-  return { value: 'Not found', evidence: '' };
-}
-
-function containsPrice(line, regex) {
-  regex.lastIndex = 0;
-  const result = regex.test(line);
-  regex.lastIndex = 0;
-  return result;
-}
-
-function summarizePrices(text) {
-  const matches = text.match(
-    /\b(?:HUF|Ft|forint)\s*\d{3,6}\b|\b\d{3,6}\s*(?:HUF|Ft|forint)\b|\b\d{1,3}(?:[ .]\d{3})+\s*(?:HUF|Ft|forint)\b|\b(?:HUF|Ft|forint)\s*\d{1,3}(?:[ .]\d{3})+\b|\b\d{1,3}(?:[ .]\d{3})+\b/gi,
-  );
-
-  if (!matches?.length) {
-    return '';
-  }
-
-  return [...new Set(matches.map((match) => match.replace(/\s+/g, ' ').trim()))].slice(0, 4).join(', ');
 }
 
 function findMatchingDate(details, targetDates) {
@@ -845,37 +777,52 @@ function normalizeForDateSearch(value) {
 
 function renderMarkdown(result) {
   const dateLabels = result.dates.map((date) => buildDateMatcher(date).label).join('; ');
-  const rows = result.events.map(
-    (event) =>
-      `| ${escapeMarkdownCell(event.date)} | [${escapeMarkdownCell(event.title)}](${event.url}) | ${escapeMarkdownCell(
-        event.fee,
-      )} |`,
-  );
+  const totalEvents = result.venueResults.reduce((count, venueResult) => count + venueResult.events.length, 0);
+  const venueSections = result.venueResults.flatMap((venueResult) => {
+    const rows = venueResult.events.map(
+      (event) => `| ${escapeMarkdownCell(event.date)} | [${escapeMarkdownCell(event.title)}](${event.url}) |`,
+    );
 
-  if (rows.length === 0) {
-    rows.push('| - | No matching events found | - |');
-  }
+    if (rows.length === 0) {
+      rows.push('| - | No matching events found |');
+    }
 
-  const notes = result.notes.length
-    ? ['## Notes', '', ...result.notes.map((note) => `- ${note}`), '']
-    : [];
+    const notes = venueResult.notes.length
+      ? ['', ...venueResult.notes.map((note) => `- Note: ${note}`)]
+      : [];
+
+    return [
+      `## ${escapeMarkdownHeading(venueResult.venueLabel)}`,
+      '',
+      `- [Venue](${venueResult.venueUrl})`,
+      `- [Events page](${venueResult.eventsUrl})`,
+      '',
+      '| Date | Event |',
+      '| --- | --- |',
+      ...rows,
+      ...notes,
+      '',
+    ];
+  });
 
   return [
     '# Facebook Program Collector Result',
     '',
-    `- Venue: ${result.venueUrl}`,
-    `- Events page: ${result.eventsUrl}`,
+    `- Source: ${result.source}`,
     `- Dates: ${dateLabels}`,
     `- Generated: ${result.generatedAt}`,
+    `- Venues: ${result.venueResults.length}`,
+    `- Events found: ${totalEvents}`,
     '',
-    '## Events',
-    '',
-    '| Date | Event | Entry fee |',
-    '| --- | --- | --- |',
-    ...rows,
-    '',
-    ...notes,
+    ...venueSections,
   ].join('\n');
+}
+
+function escapeMarkdownHeading(value) {
+  return String(value || '')
+    .replace(/\\/g, '\\\\')
+    .replace(/#/g, '\\#')
+    .trim();
 }
 
 function escapeMarkdownCell(value) {

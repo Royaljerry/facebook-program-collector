@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Collect Facebook venue events and render them as markdown.",
   "scripts": {
-    "collect": "node src/collect.js",
+    "collect": "node src/collect.js --venues-file venues.txt",
     "collect:godor": "node src/collect.js --venue https://www.facebook.com/godorklub --dates 2026-05-01,2026-05-02 --out output/godorklub-2026-05-01_2026-05-02.md"
   },
   "dependencies": {
