@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 
 const DEFAULT_TIME_ZONE = 'Europe/Budapest';
 const ROOT_DIR = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
-const DEFAULT_VENUES_FILE = 'venues.txt';
+const DEFAULT_VENUES_FILE = 'venues.md';
 const DEFAULT_AREA = 'Uncategorized';
 const SINGLE_VENUE_AREA = 'Custom venue';
 
@@ -151,7 +151,7 @@ Usage:
   npm run collect -- --venue https://www.facebook.com/godorklub --dates 2026-05-01,2026-05-02
 
 Options:
-  --venues-file <path>   Markdown venue catalog, default venues.txt
+  --venues-file <path>   Markdown venue catalog, default venues.md
   --venue <url>          Single Facebook venue page URL; overrides --venues-file
   --dates <dates>        Comma-separated YYYY-MM-DD dates
   --out <path>           Markdown output path, inside dev unless absolute

@@ -1,6 +1,6 @@
 # Facebook Program Collector
 
-Collect public Facebook events from venues listed in `venues.txt` and write a markdown report grouped by area, with event name, URL, date, venue closing time, and venue address.
+Collect public Facebook events from venues listed in `venues.md` and write a markdown report grouped by area, with event name, URL, date, venue closing time, and venue address.
 
 ## Setup
 
@@ -12,7 +12,7 @@ npx playwright install chromium
 
 ## Venues file
 
-Use a Markdown venue catalog in `venues.txt`.
+Use a Markdown venue catalog in `venues.md`.
 
 ```md
 # Venues
@@ -60,7 +60,7 @@ Log in or accept the dialog in the opened browser window, then run the command a
 
 ```sh
 npm run collect -- \
-  --venues-file venues.txt \
+  --venues-file venues.md \
   --dates 2026-05-01,2026-05-02 \
   --out output/program.md \
   --headed
@@ -68,7 +68,7 @@ npm run collect -- \
 
 Useful flags:
 
-- `--venues-file`: Markdown venue catalog. Default: `venues.txt`.
+- `--venues-file`: Markdown venue catalog. Default: `venues.md`.
 - `--venue`: single Facebook venue/page URL; overrides `--venues-file`.
 - `--dates`: comma-separated `YYYY-MM-DD` dates. If omitted, the current week's Friday and Saturday are used in the `Europe/Budapest` timezone.
 - `--out`: markdown output path, relative to `dev` unless absolute.
