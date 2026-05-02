@@ -7,6 +7,8 @@ import { fileURLToPath } from 'node:url';
 const DEFAULT_TIME_ZONE = 'Europe/Budapest';
 const ROOT_DIR = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 const DEFAULT_VENUES_FILE = 'venues.txt';
+const DEFAULT_AREA = 'Uncategorized';
+const SINGLE_VENUE_AREA = 'Custom venue';
 
 const MONTHS = {
   en: [
@@ -149,7 +151,7 @@ Usage:
   npm run collect -- --venue https://www.facebook.com/godorklub --dates 2026-05-01,2026-05-02
 
 Options:
-  --venues-file <path>   File with one Facebook venue URL per line, default venues.txt
+  --venues-file <path>   Markdown venue catalog, default venues.txt
   --venue <url>          Single Facebook venue page URL; overrides --venues-file
   --dates <dates>        Comma-separated YYYY-MM-DD dates
   --out <path>           Markdown output path, inside dev unless absolute
@@ -238,11 +240,16 @@ function eventsUrlForVenue(venueUrl) {
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));
-  const venues = await loadVenueUrls(options);
+  const venues = await loadVenues(options);
   await fs.mkdir(path.dirname(options.out), { recursive: true });
   await fs.mkdir(options.profileDir, { recursive: true });
 
-  console.log(`Collecting ${venues.length} venue${venues.length === 1 ? '' : 's'}`);
+  const areaCount = countAreas(venues);
+  console.log(
+    `Collecting ${venues.length} venue${venues.length === 1 ? '' : 's'} across ${areaCount} area${
+      areaCount === 1 ? '' : 's'
+    }`,
+  );
   if (!options.venue) {
     console.log(`Venues file: ${path.relative(ROOT_DIR, options.venuesFile)}`);
   }
@@ -263,13 +270,13 @@ async function main() {
 
   const venueResults = [];
   try {
-    for (const [index, venueUrl] of venues.entries()) {
-      console.log(`\n[${index + 1}/${venues.length}] Collecting ${venueUrl}`);
+    for (const [index, venueEntry] of venues.entries()) {
+      console.log(`\n[${index + 1}/${venues.length}] Collecting ${venueDisplayName(venueEntry)} (${venueEntry.area})`);
       try {
-        const result = await collectVenueEvents(page, { ...options, venue: venueUrl });
+        const result = await collectVenueEvents(page, { ...options, venueEntry });
         venueResults.push(result);
       } catch (error) {
-        venueResults.push(failedVenueResult(venueUrl, options.dates, error));
+        venueResults.push(failedVenueResult(venueEntry, options.dates, error));
       }
     }
   } finally {
@@ -306,11 +313,14 @@ async function main() {
   }
 }
 
-function failedVenueResult(venueUrl, dates, error) {
+function failedVenueResult(venueEntry, dates, error) {
   return {
-    venueUrl,
-    venueLabel: venueSlug(venueUrl) || venueUrl,
-    eventsUrl: safeEventsUrlForVenue(venueUrl),
+    area: venueEntry.area || DEFAULT_AREA,
+    venueUrl: venueEntry.url,
+    venueLabel: venueDisplayName(venueEntry),
+    closingTime: venueEntry.closingTime || '',
+    address: venueEntry.address || '',
+    eventsUrl: safeEventsUrlForVenue(venueEntry.url),
     dates,
     events: [],
     notes: [`Could not collect this venue: ${error.message}`],
@@ -326,10 +336,14 @@ function safeEventsUrlForVenue(venueUrl) {
   }
 }
 
-async function loadVenueUrls(options) {
+async function loadVenues(options) {
   if (options.venue) {
-    validateVenueUrl(options.venue);
-    return [options.venue];
+    return [
+      makeVenueEntry({
+        area: SINGLE_VENUE_AREA,
+        url: options.venue,
+      }),
+    ];
   }
 
   let content;
@@ -342,26 +356,184 @@ async function loadVenueUrls(options) {
     throw error;
   }
 
-  const seen = new Set();
-  const venues = [];
-
-  content
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line && !line.startsWith('#'))
-    .forEach((line) => {
-      validateVenueUrl(line);
-      if (!seen.has(line)) {
-        seen.add(line);
-        venues.push(line);
-      }
-    });
+  const venues = parseVenuesFile(content, path.relative(ROOT_DIR, options.venuesFile));
 
   if (venues.length === 0) {
     throw new Error(`Venue file has no URLs: ${path.relative(ROOT_DIR, options.venuesFile)}`);
   }
 
   return venues;
+}
+
+function parseVenuesFile(content, sourceLabel) {
+  const lines = content.split(/\r?\n/);
+
+  if (hasMarkdownVenueStructure(lines)) {
+    return dedupeVenueEntries(parseMarkdownVenueEntries(lines, sourceLabel));
+  }
+
+  return dedupeVenueEntries(parseLegacyVenueEntries(lines));
+}
+
+function hasMarkdownVenueStructure(lines) {
+  return lines.some((rawLine) => {
+    const line = rawLine.trim();
+    return /^##\s+\S/.test(line) || /^###\s+\S/.test(line);
+  });
+}
+
+function parseMarkdownVenueEntries(lines, sourceLabel) {
+  const venues = [];
+  let currentArea = '';
+  let currentVenue = null;
+
+  const finishVenue = () => {
+    if (!currentVenue) {
+      return;
+    }
+
+    if (currentVenue.items.length !== 3) {
+      throw new Error(
+        `${sourceLabel}:${currentVenue.lineNumber} venue "${currentVenue.name}" must have exactly three bullet rows: url, closing time, address`,
+      );
+    }
+
+    venues.push(
+      makeVenueEntry({
+        area: currentVenue.area,
+        name: currentVenue.name,
+        url: extractVenueUrlValue(currentVenue.items[0].value),
+        closingTime: stripVenueDetailLabel(currentVenue.items[1].value),
+        address: stripVenueDetailLabel(currentVenue.items[2].value),
+      }),
+    );
+    currentVenue = null;
+  };
+
+  lines.forEach((rawLine, index) => {
+    const lineNumber = index + 1;
+    const line = rawLine.trim();
+
+    if (!line || line.startsWith('<!--')) {
+      return;
+    }
+
+    const venueMatch = line.match(/^###\s+(.+)$/);
+    if (venueMatch) {
+      finishVenue();
+      if (!currentArea) {
+        throw new Error(`${sourceLabel}:${lineNumber} venue heading appears before an area heading`);
+      }
+      currentVenue = {
+        area: currentArea,
+        name: normalizeVenueDetail(venueMatch[1]),
+        lineNumber,
+        items: [],
+      };
+      return;
+    }
+
+    const areaMatch = line.match(/^##\s+(.+)$/);
+    if (areaMatch) {
+      finishVenue();
+      currentArea = normalizeVenueDetail(areaMatch[1]);
+      if (!currentArea) {
+        throw new Error(`${sourceLabel}:${lineNumber} area heading is empty`);
+      }
+      return;
+    }
+
+    if (/^#\s+/.test(line)) {
+      return;
+    }
+
+    const bulletMatch = line.match(/^-\s*(.*)$/);
+    if (bulletMatch) {
+      if (!currentVenue) {
+        throw new Error(`${sourceLabel}:${lineNumber} bullet row appears before a venue heading`);
+      }
+      currentVenue.items.push({
+        value: bulletMatch[1].trim(),
+        lineNumber,
+      });
+      return;
+    }
+
+    throw new Error(`${sourceLabel}:${lineNumber} could not parse venue catalog line: ${line}`);
+  });
+
+  finishVenue();
+
+  return venues;
+}
+
+function parseLegacyVenueEntries(lines) {
+  return lines
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith('#'))
+    .map((url) =>
+      makeVenueEntry({
+        area: DEFAULT_AREA,
+        url,
+      }),
+    );
+}
+
+function dedupeVenueEntries(venues) {
+  const seen = new Set();
+  const unique = [];
+
+  for (const venue of venues) {
+    if (!seen.has(venue.url)) {
+      seen.add(venue.url);
+      unique.push(venue);
+    }
+  }
+
+  return unique;
+}
+
+function makeVenueEntry({ area = DEFAULT_AREA, name = '', url, closingTime = '', address = '' }) {
+  const normalizedUrl = normalizeVenueUrl(url);
+  validateVenueUrl(normalizedUrl);
+
+  return {
+    area: normalizeVenueDetail(area) || DEFAULT_AREA,
+    name: normalizeVenueDetail(name),
+    url: normalizedUrl,
+    closingTime: normalizeVenueDetail(closingTime),
+    address: normalizeVenueDetail(address),
+  };
+}
+
+function venueDisplayName(venueEntry) {
+  return venueEntry.name || venueSlug(venueEntry.url) || venueEntry.url;
+}
+
+function countAreas(venues) {
+  return new Set(venues.map((venue) => venue.area || DEFAULT_AREA)).size;
+}
+
+function normalizeVenueUrl(value) {
+  return stripVenueDetailLabel(value).replace(/^<(.+)>$/, '$1').trim();
+}
+
+function extractVenueUrlValue(value) {
+  const stripped = stripVenueDetailLabel(value);
+  const markdownLinkMatch = stripped.match(/\((https?:\/\/[^)]+)\)/i);
+  return normalizeVenueUrl(markdownLinkMatch?.[1] ?? stripped);
+}
+
+function stripVenueDetailLabel(value) {
+  const text = normalizeVenueDetail(value);
+  const match = text.match(/^(?:url|facebook url|closing time|closing|closes|address)\s*:\s*(.*)$/i);
+  return match ? match[1].trim() : text;
+}
+
+function normalizeVenueDetail(value) {
+  return String(value || '')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function validateVenueUrl(venueUrl) {
@@ -378,15 +550,17 @@ function validateVenueUrl(venueUrl) {
 }
 
 async function collectVenueEvents(page, options) {
+  const venueEntry = options.venueEntry;
   const targetDates = options.dates.map((date) => buildDateMatcher(date));
   const notes = [];
-  const eventsUrl = eventsUrlForVenue(options.venue);
+  const eventsUrl = eventsUrlForVenue(venueEntry.url);
 
   console.log(`Opening ${eventsUrl}`);
   await page.goto(eventsUrl, { waitUntil: 'domcontentloaded', timeout: 45_000 });
   await settlePage(page);
   await dismissFacebookDialogs(page);
-  const venueLabel = await extractVenueLabel(page, options.venue);
+  const extractedVenueLabel = await extractVenueLabel(page, venueEntry.url);
+  const venueLabel = venueEntry.name || extractedVenueLabel;
 
   const loginDetected = await isLoginDetected(page);
   if (loginDetected) {
@@ -451,8 +625,11 @@ async function collectVenueEvents(page, options) {
   }
 
   return {
-    venueUrl: options.venue,
+    area: venueEntry.area || DEFAULT_AREA,
+    venueUrl: venueEntry.url,
     venueLabel,
+    closingTime: venueEntry.closingTime || '',
+    address: venueEntry.address || '',
     eventsUrl,
     dates: options.dates,
     events,
@@ -778,32 +955,12 @@ function normalizeForDateSearch(value) {
 function renderMarkdown(result) {
   const dateLabels = result.dates.map((date) => buildDateMatcher(date).label).join('; ');
   const totalEvents = result.venueResults.reduce((count, venueResult) => count + venueResult.events.length, 0);
-  const venueSections = result.venueResults.flatMap((venueResult) => {
-    const rows = venueResult.events.map(
-      (event) => `| ${escapeMarkdownCell(event.date)} | [${escapeMarkdownCell(event.title)}](${event.url}) |`,
-    );
-
-    if (rows.length === 0) {
-      rows.push('| - | No matching events found |');
-    }
-
-    const notes = venueResult.notes.length
-      ? ['', ...venueResult.notes.map((note) => `- Note: ${note}`)]
-      : [];
-
-    return [
-      `## ${escapeMarkdownHeading(venueResult.venueLabel)}`,
-      '',
-      `- [Venue](${venueResult.venueUrl})`,
-      `- [Events page](${venueResult.eventsUrl})`,
-      '',
-      '| Date | Event |',
-      '| --- | --- |',
-      ...rows,
-      ...notes,
-      '',
-    ];
-  });
+  const areaGroups = groupVenueResultsByArea(result.venueResults);
+  const venueSections = areaGroups.flatMap((group) => [
+    `## ${escapeMarkdownHeading(group.area)}`,
+    '',
+    ...group.venues.flatMap(renderVenueMarkdown),
+  ]);
 
   return [
     '# Facebook Program Collector Result',
@@ -811,6 +968,7 @@ function renderMarkdown(result) {
     `- Source: ${result.source}`,
     `- Dates: ${dateLabels}`,
     `- Generated: ${result.generatedAt}`,
+    `- Areas: ${areaGroups.length}`,
     `- Venues: ${result.venueResults.length}`,
     `- Events found: ${totalEvents}`,
     '',
@@ -818,10 +976,67 @@ function renderMarkdown(result) {
   ].join('\n');
 }
 
+function groupVenueResultsByArea(venueResults) {
+  const groups = [];
+  const byArea = new Map();
+
+  for (const venueResult of venueResults) {
+    const area = venueResult.area || DEFAULT_AREA;
+    let group = byArea.get(area);
+
+    if (!group) {
+      group = { area, venues: [] };
+      byArea.set(area, group);
+      groups.push(group);
+    }
+
+    group.venues.push(venueResult);
+  }
+
+  return groups;
+}
+
+function renderVenueMarkdown(venueResult) {
+  const rows = venueResult.events.map(
+    (event) => `| ${escapeMarkdownCell(event.date)} | [${escapeMarkdownCell(event.title)}](${event.url}) |`,
+  );
+
+  if (rows.length === 0) {
+    rows.push('| - | No matching events found |');
+  }
+
+  const venueDetails = [
+    `- [Venue](${venueResult.venueUrl})`,
+    `- [Events page](${venueResult.eventsUrl})`,
+    venueResult.closingTime ? `- Closing time: ${escapeMarkdownText(venueResult.closingTime)}` : null,
+    venueResult.address ? `- Address: ${escapeMarkdownText(venueResult.address)}` : null,
+  ].filter(Boolean);
+
+  const notes = venueResult.notes.length ? ['', ...venueResult.notes.map((note) => `- Note: ${note}`)] : [];
+
+  return [
+    `### ${escapeMarkdownHeading(venueResult.venueLabel)}`,
+    '',
+    ...venueDetails,
+    '',
+    '| Date | Event |',
+    '| --- | --- |',
+    ...rows,
+    ...notes,
+    '',
+  ];
+}
+
 function escapeMarkdownHeading(value) {
   return String(value || '')
     .replace(/\\/g, '\\\\')
     .replace(/#/g, '\\#')
+    .trim();
+}
+
+function escapeMarkdownText(value) {
+  return String(value || '')
+    .replace(/\n/g, ' ')
     .trim();
 }
 
