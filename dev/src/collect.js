@@ -131,7 +131,7 @@ function parseArgs(argv) {
 
   if (!options.out) {
     const slug = options.venue ? venueSlug(options.venue) || 'facebook-venue' : 'program';
-    options.out = `../programs/${slug}-${options.dates.join('_')}.md`;
+    options.out = `output/${slug}-${options.dates.join('_')}.md`;
   }
 
   options.out = resolveInsideDev(options.out);
