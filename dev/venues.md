@@ -1,11 +1,17 @@
-https://www.facebook.com/profile.php?id=100063365072457
-https://www.facebook.com/godorklub
-https://www.facebook.com/lampaspub
-https://www.facebook.com/concertsatszimpla/events
-https://www.facebook.com/golyaszovetkezet
-https://www.facebook.com/dunyidunyi
-https://www.facebook.com/durermusic
-https://www.facebook.com/haromhollo
-https://www.facebook.com/HunniaBisztro
-https://www.facebook.com/jedermann.budapest
-https://www.facebook.com/lumen.kavezo
+# Venues
+
+## Bulinegyed
+
+### Gödör Klub
+
+- https://www.facebook.com/godorklub
+- 02:00
+- Budapest, Király utca 8-10.
+
+## Nyolcker
+
+### Gólya
+
+- https://www.facebook.com/golyaszovetkezet
+- 01:00
+- Budapest, Orczy út 46-48.

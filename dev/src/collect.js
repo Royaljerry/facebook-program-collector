@@ -459,6 +459,12 @@ function parseMarkdownVenueEntries(lines, sourceLabel) {
       return;
     }
 
+    if (/^https?:\/\/(?:www\.)?facebook\.com\//i.test(line)) {
+      throw new Error(
+        `${sourceLabel}:${lineNumber} bare Facebook URL found in Markdown catalog. Add a "### Venue Name" heading and make the URL the first bullet row, followed by closing time and address.`,
+      );
+    }
+
     throw new Error(`${sourceLabel}:${lineNumber} could not parse venue catalog line: ${line}`);
   });
 
