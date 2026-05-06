@@ -2,3 +2,4 @@ dev/node_modules/
 dev/.facebook-profile/
 dev/debug/
 temp/
+.DS_Store
